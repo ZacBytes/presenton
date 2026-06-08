@@ -256,9 +256,6 @@ async def check_llm_and_image_provider_api_or_model_availability():
             if not ollama_model:
                 raise Exception("OLLAMA_MODEL must be provided")
 
-            if ollama_model not in SUPPORTED_OLLAMA_MODELS:
-                raise Exception(f"Model {ollama_model} is not supported")
-
             print("-" * 50)
             print("Pulling model: ", ollama_model)
             async for event in pull_ollama_model(ollama_model):

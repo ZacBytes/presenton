@@ -32,12 +32,6 @@ async def pull_model(
     session: AsyncSession = Depends(get_async_session),
 ):
 
-    if model not in SUPPORTED_OLLAMA_MODELS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Model {model} is not supported",
-        )
-
     try:
         pulled_models = await list_pulled_ollama_models()
         filtered_models = [

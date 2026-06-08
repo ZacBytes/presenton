@@ -42,6 +42,7 @@ const TextProvider = ({ onInputChange, llmConfig }: OpenAIConfigProps) => {
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsChecked, setModelsChecked] = useState(false);
+  const [useCustomModelName, setUseCustomModelName] = useState(false);
   const [showApiKey, setShowApiKey] = useState(false);
   const isFirstRender = useRef(true);
 
@@ -261,9 +262,91 @@ const TextProvider = ({ onInputChange, llmConfig }: OpenAIConfigProps) => {
           }
         );
       } else if (selectedProvider === "ollama") {
-        response = await fetch(
-          getApiUrl("/api/v1/ppt/ollama/models/supported")
-        );
+        const [supportedRes, availableRes] = await Promise.allSettled([
+          fetch(getApiUrl("/api/v1/ppt/ollama/models/supported")),
+          fetch(getApiUrl("/api/v1/ppt/ollama/models/available")),
+        ]);
+
+        let supportedData: any[] = [];
+        let availableData: any[] = [];
+
+        if (supportedRes.status === "fulfilled" && supportedRes.value.ok) {
+          try {
+            supportedData = await supportedRes.value.json();
+          } catch (e) {
+            console.error(e);
+          }
+        }
+        if (availableRes.status === "fulfilled" && availableRes.value.ok) {
+          try {
+            availableData = await availableRes.value.json();
+          } catch (e) {
+            console.error(e);
+          }
+        }
+
+        const supportedModels: ModelOption[] = Array.isArray(supportedData)
+          ? supportedData.map((m: any) => ({
+              value: m.value || m.name || "",
+              label: m.label || m.value || m.name || "",
+              size: m.size,
+            })).filter(m => !!m.value)
+          : [];
+
+        const availableModelsMapped: ModelOption[] = Array.isArray(availableData)
+          ? availableData.map((m: any) => {
+              let sizeStr = "";
+              if (m.size) {
+                const gb = m.size / (1024 * 1024 * 1024);
+                if (gb >= 1) {
+                  sizeStr = `${gb.toFixed(1)}GB`;
+                } else {
+                  sizeStr = `${(m.size / (1024 * 1024)).toFixed(0)}MB`;
+                }
+              }
+              return {
+                value: m.name || "",
+                label: m.name || "",
+                size: sizeStr || undefined,
+              };
+            }).filter(m => !!m.value)
+          : [];
+
+        const mergedMap = new Map<string, ModelOption>();
+        for (const m of supportedModels) {
+          mergedMap.set(m.value, m);
+        }
+        for (const m of availableModelsMapped) {
+          const existing = mergedMap.get(m.value);
+          if (existing) {
+            mergedMap.set(m.value, {
+              ...existing,
+              size: m.size || existing.size,
+            });
+          } else {
+            mergedMap.set(m.value, m);
+          }
+        }
+
+        const normalizedModels = Array.from(mergedMap.values());
+        setAvailableModels(normalizedModels);
+        setModelsChecked(true);
+
+        if (normalizedModels.length > 0 && currentModelField) {
+          const modelValues = normalizedModels.map((model) => model.value);
+          if (currentModel && modelValues.includes(currentModel)) {
+            onInputChange(currentModel, currentModelField);
+            return;
+          }
+
+          const preferredDefault = "llama3.1:8b";
+          const nextModel = modelValues.includes(preferredDefault)
+            ? preferredDefault
+            : modelValues[0];
+          onInputChange(nextModel, currentModelField);
+        }
+        setModelsLoading(false);
+        return;
       } else {
         const openAiCompatibleUrl =
           selectedProvider === "custom"
@@ -398,6 +481,15 @@ const TextProvider = ({ onInputChange, llmConfig }: OpenAIConfigProps) => {
       fetchAvailableModels();
     }
   }, [selectedProvider, modelsChecked, modelsLoading]);
+
+  useEffect(() => {
+    if (selectedProvider === "ollama" && currentModel && modelsChecked) {
+      const isKnown = availableModels.some((m) => m.value === currentModel);
+      if (!isKnown) {
+        setUseCustomModelName(true);
+      }
+    }
+  }, [selectedProvider, currentModel, availableModels, modelsChecked]);
 
   return (
     <div className="space-y-6 bg-[#F9F8F8] p-7 rounded-[12px] ">
@@ -784,101 +876,131 @@ const TextProvider = ({ onInputChange, llmConfig }: OpenAIConfigProps) => {
           {!isManualModelProvider &&
           selectedProvider !== "codex" &&
           modelsChecked &&
-          availableModels.length > 0 ? (
+          (availableModels.length > 0 || selectedProvider === "ollama") ? (
             <div className="w-[262px]">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-3">
                   {selectedProvider === "ollama"
-                    ? "Choose a supported model"
+                    ? "Ollama Model"
                     : `Select ${modelLabel} Model`}
                 </label>
                 <div className="w-full">
-                  <Popover
-                    open={openModelSelect}
-                    onOpenChange={setOpenModelSelect}
-                  >
-                    <PopoverTrigger asChild>
-                      <Button
-                        variant="outline"
-                        role="combobox"
-                        aria-expanded={openModelSelect}
-                        className="w-full h-12 px-4 py-4 outline-none border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-colors hover:border-gray-400 justify-between"
-                      >
-                        <span className="text-sm truncate font-medium text-gray-900">
-                          {(() => {
-                            if (!currentModel) return "Select a model";
-                            const selectedModel = availableModels.find(
-                              (model) => model.value === currentModel
-                            );
-                            if (!selectedModel) return currentModel;
-                            if (
-                              selectedProvider === "ollama" &&
-                              selectedModel.size
-                            ) {
-                              return `${selectedModel.label} (${selectedModel.size})`;
-                            }
-                            return selectedModel.label;
-                          })()}
-                        </span>
-
-                        <ChevronUp className="w-4 h-4 text-gray-500" />
-                      </Button>
-                    </PopoverTrigger>
-                    <PopoverContent
-                      className="p-0"
-                      align="start"
-                      style={{ width: "var(--radix-popover-trigger-width)" }}
+                  {selectedProvider === "ollama" && useCustomModelName ? (
+                    <input
+                      type="text"
+                      value={currentModel}
+                      onChange={(e) => {
+                        if (currentModelField) {
+                          onInputChange(e.target.value, currentModelField);
+                        }
+                      }}
+                      className="w-full px-4 h-12 outline-none border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-colors"
+                      placeholder="e.g. mistral, phi3..."
+                    />
+                  ) : (
+                    <Popover
+                      open={openModelSelect}
+                      onOpenChange={setOpenModelSelect}
                     >
-                      <Command>
-                        <CommandInput placeholder="Search models..." />
-                        <CommandList>
-                          <CommandEmpty>No model found.</CommandEmpty>
-                          <CommandGroup>
-                            {availableModels.map((model) => (
-                              <CommandItem
-                                key={model.value}
-                                value={model.value}
-                                onSelect={() => {
-                                  if (currentModelField) {
-                                    onInputChange(
-                                      model.value,
-                                      currentModelField
-                                    );
-                                  }
-                                  setOpenModelSelect(false);
-                                }}
-                              >
-                                <Check
-                                  className={cn(
-                                    "mr-2 h-4 w-4",
-                                    currentModel === model.value
-                                      ? "opacity-100"
-                                      : "opacity-0"
-                                  )}
-                                />
-                                <div className="flex gap-3 items-center">
-                                  <div className="flex flex-col space-y-1 flex-1">
-                                    <div className="flex items-center justify-between gap-2">
-                                      <span className="text-sm font-medium text-gray-900">
-                                        {model.label}
-                                      </span>
-                                      {selectedProvider === "ollama" &&
-                                      model.size ? (
-                                        <span className="text-xs font-medium text-gray-500">
-                                          {model.size}
+                      <PopoverTrigger asChild>
+                        <Button
+                          variant="outline"
+                          role="combobox"
+                          aria-expanded={openModelSelect}
+                          className="w-full h-12 px-4 py-4 outline-none border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-colors hover:border-gray-400 justify-between"
+                        >
+                          <span className="text-sm truncate font-medium text-gray-900">
+                            {(() => {
+                              if (!currentModel) return "Select a model";
+                              const selectedModel = availableModels.find(
+                                (model) => model.value === currentModel
+                              );
+                              if (!selectedModel) return currentModel;
+                              if (
+                                selectedProvider === "ollama" &&
+                                selectedModel.size
+                              ) {
+                                return `${selectedModel.label} (${selectedModel.size})`;
+                              }
+                              return selectedModel.label;
+                            })()}
+                          </span>
+
+                          <ChevronUp className="w-4 h-4 text-gray-500" />
+                        </Button>
+                      </PopoverTrigger>
+                      <PopoverContent
+                        className="p-0"
+                        align="start"
+                        style={{ width: "var(--radix-popover-trigger-width)" }}
+                      >
+                        <Command>
+                          <CommandInput placeholder="Search models..." />
+                          <CommandList>
+                            <CommandEmpty>No model found.</CommandEmpty>
+                            <CommandGroup>
+                              {availableModels.map((model) => (
+                                <CommandItem
+                                  key={model.value}
+                                  value={model.value}
+                                  onSelect={() => {
+                                    if (currentModelField) {
+                                      onInputChange(
+                                        model.value,
+                                        currentModelField
+                                      );
+                                    }
+                                    setOpenModelSelect(false);
+                                  }}
+                                >
+                                  <Check
+                                    className={cn(
+                                      "mr-2 h-4 w-4",
+                                      currentModel === model.value
+                                        ? "opacity-100"
+                                        : "opacity-0"
+                                    )}
+                                  />
+                                  <div className="flex gap-3 items-center">
+                                    <div className="flex flex-col space-y-1 flex-1">
+                                      <div className="flex items-center justify-between gap-2">
+                                        <span className="text-sm font-medium text-gray-900">
+                                          {model.label}
                                         </span>
-                                      ) : null}
+                                        {selectedProvider === "ollama" &&
+                                        model.size ? (
+                                          <span className="text-xs font-medium text-gray-500">
+                                            {model.size}
+                                          </span>
+                                        ) : null}
+                                      </div>
                                     </div>
                                   </div>
-                                </div>
-                              </CommandItem>
-                            ))}
-                          </CommandGroup>
-                        </CommandList>
-                      </Command>
-                    </PopoverContent>
-                  </Popover>
+                                </CommandItem>
+                              ))}
+                            </CommandGroup>
+                          </CommandList>
+                        </Command>
+                      </PopoverContent>
+                    </Popover>
+                  )}
                 </div>
+                {selectedProvider === "ollama" && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setUseCustomModelName(!useCustomModelName);
+                      if (useCustomModelName) {
+                        if (availableModels.length > 0 && currentModelField) {
+                          onInputChange(availableModels[0].value, currentModelField);
+                        }
+                      }
+                    }}
+                    className="mt-2 text-xs font-medium text-[#7A5AF8] underline underline-offset-2 hover:text-[#6d46e6]"
+                  >
+                    {useCustomModelName ? "Select from list" : "Enter custom model name"}
+                  </button>
+                )}
               </div>
             </div>
           ) : null}
