@@ -1,7 +1,9 @@
 import path from "path";
 import os from "os";
 import fs from "fs/promises";
+import { existsSync } from "fs";
 import { spawn } from "child_process";
+import { fileURLToPath } from "url";
 import { sanitizeFilename } from "@/app/(presentation-generator)/utils/others";
 import {
   BoundedTextBuffer,
@@ -22,6 +24,20 @@ export function getPresentonAppRoot(): string {
     path.join(process.cwd(), "..", "..")
   );
 }
+
+export function getAppDataDirectory(): string {
+  const envVal = process.env.APP_DATA_DIRECTORY?.trim();
+  if (envVal) return envVal;
+
+  if (process.platform === "win32") {
+    return path.join(
+      process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"),
+      "presenton"
+    );
+  }
+  return "/app/user_data";
+}
+
 
 function extractSessionTokenFromCookieHeader(cookieHeader?: string): string | undefined {
   if (!cookieHeader) {
@@ -58,6 +74,17 @@ function bundledConverterPath(exportRoot: string): string {
   if (process.platform === "linux" && process.arch === "x64") {
     return path.join(exportRoot, "py", "convert-linux-x64");
   }
+  if (process.platform === "win32" && process.arch === "x64") {
+    const candidates = [
+      path.join(exportRoot, "py", "convert-win32-x64.exe"),
+      path.join(exportRoot, "py", "convert-win32.exe"),
+      path.join(exportRoot, "py", "convert.exe"),
+    ];
+    for (const c of candidates) {
+      if (existsSync(c)) return c;
+    }
+    return candidates[0];
+  }
   throw new Error(
     `No bundled export converter for ${process.platform}/${process.arch}. Set BUILT_PYTHON_MODULE_PATH.`
   );
@@ -86,7 +113,7 @@ function normalizeExportOutputPath(params: {
   urlValue?: string;
 }): string {
   const { pathValue, urlValue } = params;
-  const appData = process.env.APP_DATA_DIRECTORY?.trim();
+  const appData = getAppDataDirectory();
 
   const resolveAppDataRelative = (value: string): string => {
     if (!appData) {
@@ -109,15 +136,23 @@ function normalizeExportOutputPath(params: {
 
   if (urlValue && typeof urlValue === "string") {
     if (urlValue.startsWith("file://")) {
-      const parsed = new URL(urlValue);
-      const fsPath = decodeURIComponent(parsed.pathname || "");
-      if (fsPath.startsWith("/app_data/")) {
+      if (urlValue.includes("/app_data/")) {
+        const relativePart = urlValue.substring(urlValue.indexOf("/app_data/") + "/app_data/".length);
+        return resolveAppDataRelative(relativePart);
+      }
+      try {
+        return fileURLToPath(urlValue);
+      } catch {
+        const parsed = new URL(urlValue);
+        let fsPath = decodeURIComponent(parsed.pathname || "");
+        if (process.platform === "win32" && fsPath.startsWith("/") && fsPath.charAt(2) === ":") {
+          fsPath = fsPath.slice(1);
+        }
+        if (path.isAbsolute(fsPath)) {
+          return fsPath;
+        }
         return resolveAppDataRelative(fsPath);
       }
-      if (path.isAbsolute(fsPath)) {
-        return fsPath;
-      }
-      return resolveAppDataRelative(fsPath);
     }
 
     if (urlValue.startsWith("/app_data/")) {
@@ -166,7 +201,7 @@ async function runBundledPresentationExportLocked(params: {
   await fs.access(converter);
 
   const nextjsUrl =
-    process.env.NEXT_PUBLIC_URL?.trim() || "http://127.0.0.1";
+    process.env.NEXT_PUBLIC_URL?.trim() || "http://127.0.0.1:3000";
   const q = new URLSearchParams({ id: presentationId });
   const sessionToken = extractSessionTokenFromCookieHeader(cookieHeader);
   if (sessionToken) {
@@ -213,6 +248,7 @@ async function runBundledPresentationExportLocked(params: {
         env: {
           ...process.env,
           BUILT_PYTHON_MODULE_PATH: converter,
+          APP_DATA_DIRECTORY: getAppDataDirectory(),
         },
       });
       const stderr = new BoundedTextBuffer();

@@ -201,6 +201,117 @@ const PresentationHeader = ({
     }
   };
 
+  const rgbToHex = (rgb: string) => {
+    if (!rgb || rgb === "transparent" || rgb === "rgba(0, 0, 0, 0)") return "FFFFFF";
+    const matches = rgb.match(/^rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)$/);
+    if (!matches) return "FFFFFF";
+    if (matches[4] !== undefined && parseFloat(matches[4]) === 0) return "FFFFFF";
+    const r = parseInt(matches[1]).toString(16).padStart(2, '0');
+    const g = parseInt(matches[2]).toString(16).padStart(2, '0');
+    const b = parseInt(matches[3]).toString(16).padStart(2, '0');
+    return (r + g + b).toUpperCase();
+  };
+
+  const scrapeSlide = (slideEl: HTMLElement, iframeWin: Window) => {
+    const slideRect = slideEl.getBoundingClientRect();
+    const W = slideRect.width || 1280;
+    const H = slideRect.height || 720;
+    
+    const toInches = (rect: DOMRect) => {
+      return {
+        x: ((rect.left - slideRect.left) / W) * 10.0,
+        y: ((rect.top - slideRect.top) / H) * 5.625,
+        w: (rect.width / W) * 10.0,
+        h: (rect.height / H) * 5.625
+      };
+    };
+
+    const elements: any[] = [];
+
+    const walk = (el: Element) => {
+      const style = iframeWin.getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+        return;
+      }
+
+      const rect = el.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) {
+        return;
+      }
+
+      // 1. Image check
+      if (el.tagName === 'IMG') {
+        const src = el.getAttribute('src');
+        if (src) {
+          elements.push({
+            type: 'image',
+            src: src,
+            ...toInches(rect)
+          });
+        }
+        return;
+      }
+
+      // 2. Shape check (colored divs, border cards, or rotated diamonds)
+      const bgColor = style.backgroundColor;
+      const isVisibleBg = bgColor && bgColor !== 'rgba(0, 0, 0, 0)' && bgColor !== 'transparent' && bgColor !== 'rgb(255, 255, 255)';
+      const hasBorder = style.borderWidth && parseFloat(style.borderWidth) > 0 && style.borderColor && style.borderColor !== 'transparent';
+      
+      const isDiamond = el.classList.contains('rotate-45') || style.transform.includes('rotate(45deg)') || style.transform.includes('matrix');
+      const isLine = rect.height <= 6 || rect.width <= 6;
+
+      if ((isVisibleBg || hasBorder) && (isLine || el.classList.contains('rounded-[10px]') || isDiamond)) {
+        elements.push({
+          type: 'shape',
+          shapeType: isDiamond ? 'diamond' : 'rect',
+          fill: rgbToHex(bgColor),
+          border: hasBorder ? { color: rgbToHex(style.borderColor), width: parseFloat(style.borderWidth) } : undefined,
+          ...toInches(rect)
+        });
+        if (isLine) return; // Stop walking children of visual lines/div dividers
+      }
+
+      // 3. Text Nodes check
+      let hasDirectText = false;
+      for (let i = 0; i < el.childNodes.length; i++) {
+        const node = el.childNodes[i];
+        if (node.nodeType === Node.TEXT_NODE && (node.textContent || "").trim().length > 0) {
+          hasDirectText = true;
+          break;
+        }
+      }
+
+      if (hasDirectText) {
+        const text = (el as HTMLElement).innerText || el.textContent || "";
+        const fontSize = parseFloat(style.fontSize) * 0.75; // convert px to pt
+        const color = rgbToHex(style.color);
+        const isBold = parseInt(style.fontWeight) >= 600 || style.fontWeight === 'bold';
+        const isItalic = style.fontStyle === 'italic';
+        const align = style.textAlign;
+
+        elements.push({
+          type: 'text',
+          text: text,
+          color: color,
+          fontSize: fontSize,
+          bold: isBold,
+          italic: isItalic,
+          align: align,
+          fontFace: style.fontFamily.replace(/['"]/g, '').split(',')[0].trim(),
+          ...toInches(rect)
+        });
+        return; // Avoid walking sub-children of simple text elements
+      }
+
+      for (let i = 0; i < el.children.length; i++) {
+        walk(el.children[i]);
+      }
+    };
+
+    walk(slideEl);
+    return elements;
+  };
+
   const handleExportPptx = async () => {
     if (isStreaming) return;
 
@@ -217,24 +328,91 @@ const PresentationHeader = ({
         "Your presentation is being exported. This may take a moment."
       );
       setIsExporting(true);
-      // Save the presentation data before exporting
+      
+      // Save presentation content before export
       await PresentationGenerationApi.updatePresentationContent(
         presentationData
       );
+      
       const safePptxFileName = buildSafeExportFileName(
         presentationData?.title,
         "pptx"
       );
       const safePptxTitle = safePptxFileName.replace(/\.pptx$/i, "");
+      
       if (window.electron?.exportPresentation) {
         await exportViaIpc("pptx", safePptxTitle);
       } else {
+        // 1. Create a hidden iframe pointing to /pdf-maker to render all slides
+        const iframe = document.createElement('iframe');
+        iframe.style.position = 'fixed';
+        iframe.style.width = '1280px';
+        iframe.style.height = '720px';
+        iframe.style.left = '-9999px';
+        iframe.style.top = '-9999px';
+        iframe.src = `/pdf-maker?id=${presentation_id}`;
+        document.body.appendChild(iframe);
+
+        // 2. Wait for iframe to load and render
+        await new Promise((resolve) => {
+          iframe.onload = () => {
+            setTimeout(resolve, 800); // Allow React templates and fonts to fully render
+          };
+        });
+
+        const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
+        const iframeWin = iframe.contentWindow;
+        if (!iframeDoc || !iframeWin) {
+          throw new Error("Could not access export frame document");
+        }
+
+        // 3. Scrape slide DOM elements into high-fidelity PPTX vectors
+        const slidesData: any[] = [];
+        const slideElements = iframeDoc.querySelectorAll('.main-slide');
+        
+        slideElements.forEach((slideEl, index) => {
+          const elements = scrapeSlide(slideEl as HTMLElement, iframeWin);
+          const speakerNote = slideEl.getAttribute('data-speaker-note') || "";
+          const isCover = index === 0;
+          
+          const layoutRoot = slideEl.querySelector('.slide-edit-stage > *');
+          let bgColor = "rgb(255, 255, 255)";
+          if (layoutRoot) {
+            const bg = iframeWin.getComputedStyle(layoutRoot).backgroundColor;
+            if (bg && bg !== "rgba(0, 0, 0, 0)" && bg !== "transparent") {
+              bgColor = bg;
+            } else {
+              const slideInner = slideEl.querySelector('.slide-export-inner') || slideEl;
+              bgColor = iframeWin.getComputedStyle(slideInner).backgroundColor || "rgb(255, 255, 255)";
+            }
+          } else {
+            const slideInner = slideEl.querySelector('.slide-export-inner') || slideEl;
+            bgColor = iframeWin.getComputedStyle(slideInner).backgroundColor || "rgb(255, 255, 255)";
+          }
+          
+          slidesData.push({
+            index,
+            isCover,
+            bgColor: rgbToHex(bgColor),
+            speakerNote,
+            elements
+          });
+        });
+
+        // 4. Remove temporary iframe
+        document.body.removeChild(iframe);
+
+        // 5. Send vector layout to backend for compilation
         const response = await fetch("/api/export-presentation", {
           method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
           body: JSON.stringify({
             format: "pptx",
             id: presentation_id,
             title: safePptxTitle,
+            slidesData
           }),
         });
 
@@ -249,6 +427,7 @@ const PresentationHeader = ({
 
         downloadLink(pptxPath, safePptxFileName);
       }
+      
       notify.success(
         "Export complete",
         "Your PPTX file has been downloaded.",

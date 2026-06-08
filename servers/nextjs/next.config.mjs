@@ -13,12 +13,21 @@ const nextConfig = {
       }
     : {}),
 
-  // Rewrites for development - proxy font requests to FastAPI backend
+  // Rewrites for development - proxy API and asset requests to FastAPI backend
   async rewrites() {
+    const fastApiBase = process.env.NEXT_PUBLIC_FAST_API || 'http://127.0.0.1:8000';
     return [
       {
-        source: '/app_data/fonts/:path*',
-        destination: 'http://localhost:5000/app_data/fonts/:path*',
+        source: '/api/v1/:path*',
+        destination: `${fastApiBase}/api/v1/:path*`,
+      },
+      {
+        source: '/app_data/:path*',
+        destination: `${fastApiBase}/app_data/:path*`,
+      },
+      {
+        source: '/static/:path*',
+        destination: `${fastApiBase}/static/:path*`,
       },
     ];
   },

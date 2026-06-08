@@ -2,9 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import path from "path";
 import fs from "fs";
 import crypto from "crypto";
+import { getAppDataDirectory } from "@/lib/run-bundled-presentation-export";
 
 
-const userDataDir = process.env.APP_DATA_DIRECTORY!;
+const userDataDir = getAppDataDirectory();
 
 export async function POST(request: NextRequest) {
   try {
@@ -21,12 +22,7 @@ export async function POST(request: NextRequest) {
     const bytes = await file.arrayBuffer();
     const buffer = Buffer.from(bytes);
 
-    if (!userDataDir) {
-      return NextResponse.json(
-        { error: "User data directory not found" },
-        { status: 500 }
-      );
-    }
+
     // Create uploads directory if it doesn't exist
     const uploadsDir = path.join(userDataDir, "uploads");
     fs.mkdirSync(uploadsDir, { recursive: true });

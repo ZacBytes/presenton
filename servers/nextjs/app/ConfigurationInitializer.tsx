@@ -103,9 +103,9 @@ export function ConfigurationInitializer({ children }: { children: React.ReactNo
         } else {
           setIsLoading(false);
         }
-      } else if (route !== '/') {
-        router.push('/');
-        setLoadingToFalseAfterNavigatingTo('/');
+      } else if (route !== '/settings') {
+        router.push('/settings');
+        setLoadingToFalseAfterNavigatingTo('/settings');
       } else {
         setIsLoading(false);
       }

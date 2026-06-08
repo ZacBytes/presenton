@@ -1,17 +1,3 @@
-/**
- * Download presenton-export release (Linux x64) into repo-root `presentation-export/`.
- * Same release host as Electron (`electron/sync_export_runtime.js`); Docker uses this at build time.
- *
- * Version resolution (first match):
- *   1. EXPORT_RUNTIME_VERSION env
- *   2. package.json → presentationExportVersion
- *
- * CLI: --force  re-download even if valid runtime already exists
- *       --check-only  verify index.cjs + converter exist and exit 0/1
- *
- * On every run (including --check-only), index.cjs is overwritten from index.js
- * so the CommonJS entrypoint never drifts from the bundled ESM build.
- */
 const fs = require("fs");
 const path = require("path");
 const https = require("https");
@@ -27,7 +13,6 @@ const packageJsonFile = path.join(repoRoot, "package.json");
 const cacheDir = path.join(repoRoot, ".cache", "presentation-export");
 const exportRepoBase =
   "https://github.com/presenton/presenton-export/releases/download";
-const linuxAssetName = "export-Linux-X64.zip";
 
 const cliArgs = new Set(process.argv.slice(2));
 const forceDownload = cliArgs.has("--force");
@@ -35,6 +20,49 @@ const checkOnly = cliArgs.has("--check-only");
 
 function ensureDir(dirPath) {
   fs.mkdirSync(dirPath, { recursive: true });
+}
+
+function getPlatformAssetName() {
+  const platformArch = `${process.platform}-${process.arch}`;
+  if (platformArch === "linux-x64") return "export-Linux-X64.zip";
+  if (platformArch === "darwin-arm64") return "export-macOS-ARM64.zip";
+  if (platformArch === "win32-x64") return "export-Windows-X64.zip";
+
+  // Default fallback
+  return "export-Windows-X64.zip";
+}
+
+function getConverterCandidates(baseDir = targetPyDir) {
+  const platformAliases = {
+    linux: ["linux"],
+    darwin: ["darwin", "macos", "mac"],
+    win32: ["win32", "windows", "win"],
+  };
+  const archAliases = {
+    x64: ["x64", "amd64"],
+    arm64: ["arm64", "aarch64"],
+  };
+
+  const candidates = [];
+  const platforms = platformAliases[process.platform] || [process.platform];
+  const archs = archAliases[process.arch] || [process.arch];
+  const windows = process.platform === "win32";
+
+  for (const p of platforms) {
+    for (const a of archs) {
+      candidates.push(path.join(baseDir, `convert-${p}-${a}`));
+      candidates.push(path.join(baseDir, `convert-${p}-${a}.exe`));
+    }
+    candidates.push(path.join(baseDir, `convert-${p}`));
+    candidates.push(path.join(baseDir, `convert-${p}.exe`));
+  }
+
+  if (windows) {
+    candidates.push(path.join(baseDir, "convert.exe"));
+  }
+  candidates.push(path.join(baseDir, "convert"));
+
+  return [...new Set(candidates)];
 }
 
 function readPinnedVersion() {
@@ -123,14 +151,6 @@ function chmodIfPossible(filePath) {
   }
 }
 
-function getConverterCandidates(baseDir = targetPyDir) {
-  return [
-    path.join(baseDir, "convert-linux-x64"),
-    path.join(baseDir, "convert-linux-amd64"),
-    path.join(baseDir, "convert"),
-  ];
-}
-
 function hasRuntimeBundle(baseDir) {
   const indexPath = path.join(baseDir, "index.js");
   if (!fs.existsSync(indexPath)) {
@@ -202,7 +222,7 @@ function validateExistingRuntime() {
   if (!converterPath) {
     return {
       ok: false,
-      reason: `No Linux converter binary under ${targetPyDir} or ${targetRoot}.`,
+      reason: `No converter binary under ${targetPyDir} or ${targetRoot}.`,
     };
   }
   chmodIfPossible(converterPath);
@@ -250,6 +270,20 @@ function downloadFile(url, outputPath, redirects = 5) {
 
 function unzipArchive(zipPath, destDir) {
   ensureDir(destDir);
+  if (process.platform === "win32") {
+    const psQuote = (p) => p.replace(/'/g, "''");
+    execFileSync(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-Command",
+        `Expand-Archive -LiteralPath '${psQuote(zipPath)}' -DestinationPath '${psQuote(destDir)}' -Force`,
+      ],
+      { stdio: "inherit" }
+    );
+    return;
+  }
+
   execFileSync("unzip", ["-o", zipPath, "-d", destDir], { stdio: "inherit" });
 }
 
@@ -271,13 +305,26 @@ function resolveExtractedRoot(extractDir) {
 
 async function downloadAndInstallRuntime() {
   const tag = await getTargetVersion();
-  const downloadUrl = `${exportRepoBase}/${tag}/${linuxAssetName}`;
+  const assetName = getPlatformAssetName();
+  
+  // Fetch release assets from GitHub API
+  const releaseUrl = `https://api.github.com/repos/presenton/presenton-export/releases/tags/${tag}`;
+  console.log(`[presentation-export] Fetching release metadata from ${releaseUrl}`);
+  const releaseData = await requestJson(releaseUrl);
+  const assets = releaseData.assets || [];
+  const targetAsset = assets.find(a => a.name === assetName);
+  
+  if (!targetAsset) {
+    throw new Error(`Asset ${assetName} not found in release ${tag}`);
+  }
+  
+  const downloadUrl = `https://api.github.com/repos/presenton/presenton-export/releases/assets/${targetAsset.id}`;
 
   ensureDir(cacheDir);
-  const zipPath = path.join(cacheDir, linuxAssetName);
+  const zipPath = path.join(cacheDir, assetName);
   const extractDir = path.join(cacheDir, `extract-${Date.now()}`);
 
-  console.log(`[presentation-export] Downloading ${downloadUrl}`);
+  console.log(`[presentation-export] Downloading ${assetName} via API (ID: ${targetAsset.id})`);
   await downloadFile(downloadUrl, zipPath);
 
   console.log(`[presentation-export] Extracting ${zipPath}`);

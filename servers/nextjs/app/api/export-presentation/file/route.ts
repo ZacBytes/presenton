@@ -3,6 +3,7 @@ import fsPromises from "fs/promises";
 import path from "path";
 import { Readable } from "stream";
 import { NextRequest, NextResponse } from "next/server";
+import { getAppDataDirectory } from "@/lib/run-bundled-presentation-export";
 
 const CONTENT_TYPES: Record<string, string> = {
   ".pdf": "application/pdf",
@@ -11,10 +12,7 @@ const CONTENT_TYPES: Record<string, string> = {
 };
 
 function getExportsDirectory(): string {
-  const appDataDirectory = process.env.APP_DATA_DIRECTORY?.trim();
-  if (!appDataDirectory) {
-    throw new Error("APP_DATA_DIRECTORY is required to download exported files.");
-  }
+  const appDataDirectory = getAppDataDirectory();
   return path.join(appDataDirectory, "exports");
 }
 
