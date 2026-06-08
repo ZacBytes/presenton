@@ -321,7 +321,7 @@ async def prepare_presentation(
     presentation_structure.slides = presentation_structure.slides[: len(outlines)]
     for index in range(total_outlines):
         random_slide_index = random.randint(0, total_slide_layouts - 1)
-        if index >= total_outlines:
+        if index >= len(presentation_structure.slides):
             presentation_structure.slides.append(random_slide_index)
             continue
         if presentation_structure.slides[index] >= total_slide_layouts:
@@ -810,7 +810,7 @@ async def generate_presentation_handler(
         presentation_structure.slides = presentation_structure.slides[:total_outlines]
         for index in range(total_outlines):
             random_slide_index = random.randint(0, total_slide_layouts - 1)
-            if index >= total_outlines:
+            if index >= len(presentation_structure.slides):
                 presentation_structure.slides.append(random_slide_index)
                 continue
             if presentation_structure.slides[index] >= total_slide_layouts:
