@@ -18,15 +18,15 @@ import {
   nextjsDir,
 } from "./utils/constants";
 import { setupIpcHandlers } from "./ipc";
-import { ipcMain } from "electron";
 import { stopActiveExportProcesses } from "./ipc/export_handlers";
 import { setupLibreOfficeInstallHandlers, stopActiveLibreOfficeInstallProcesses } from "./ipc/libreoffice_install_handlers";
-import { setupSetupInstallHandlers, stopActiveSetupInstallProcesses } from "./ipc/setup_install_handlers";
-import { checkDependenciesBeforeWindow } from "./utils/setup-dependencies";
-import { getSofficePath, isLibreOfficeInstalled } from "./utils/libreoffice-check";
+import { getSofficePath } from "./utils/libreoffice-check";
 import { getLiteParseRunnerPath } from "./utils/liteparse-check";
-import { getImageMagickBinaryPath, isImageMagickInstalled } from "./utils/imagemagick-check";
-import { isExportChromiumAvailable } from "./utils/export-chromium";
+import {
+  buildPathWithImageMagick,
+  resolveImageMagickRuntime,
+  type ImageMagickRuntime,
+} from "./utils/imagemagick-runtime";
 import { startUpdateChecker, stopUpdateChecker } from "./utils/update-checker";
 import {
   addMainBreadcrumb,
@@ -77,11 +77,6 @@ type ManagedServerProcess = Awaited<ReturnType<typeof startFastApiServer>>;
 var fastApiServer: ManagedServerProcess | undefined;
 var nextjsServer: ManagedServerProcess | undefined;
 let isStopping = false;
-const startupStatus: Record<string, string> = {
-  libreoffice: "checking",
-  imagemagick: "checking",
-  chromium: "checking",
-};
 
 function getLiveMainWindow(): BrowserWindow | undefined {
   if (!win || win.isDestroyed()) {
@@ -142,6 +137,11 @@ function resolveExportConverterPath(appRoot: string): string | undefined {
   return candidates.find((candidate) => fs.existsSync(candidate));
 }
 
+function isDisableAuthEnabledValue(value?: string): boolean {
+  const raw = value?.trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+
 function resolveElectronDisableAuth(): string {
   const raw = (
     process.env.ELECTRON_DISABLE_AUTH ?? process.env.DISABLE_AUTH
@@ -152,10 +152,27 @@ function resolveElectronDisableAuth(): string {
   if (["0", "false", "no", "off"].includes(raw)) {
     return "false";
   }
-  if (["1", "true", "yes", "on"].includes(raw)) {
+  if (isDisableAuthEnabledValue(raw)) {
     return "true";
   }
   return "true";
+}
+
+function buildImageMagickEnv(runtime: ImageMagickRuntime | null): Partial<FastApiEnv> {
+  if (!runtime) {
+    return {};
+  }
+
+  const pathKey = process.platform === "win32" && process.env.Path !== undefined
+    ? "Path"
+    : "PATH";
+
+  return {
+    IMAGEMAGICK_BINARY: runtime.binaryPath,
+    MAGICK_HOME: runtime.homeDir,
+    MAGICK_CONFIGURE_PATH: runtime.homeDir,
+    [pathKey]: buildPathWithImageMagick(runtime),
+  };
 }
 
 app.commandLine.appendSwitch('gtk-version', '3');
@@ -175,9 +192,6 @@ const chromiumCacheRecovery = prepareChromiumCacheRecovery(
   electronAppPaths.userDataDir,
 );
 safeLog("[Presenton] Electron paths initialized:", electronAppPaths);
-
-// Allow renderer to query initial startup status as soon as it loads.
-ipcMain.handle("startup:get-status", () => startupStatus);
 
 initMainSentry();
 updateSentryRuntimeContext(chromiumCacheRecovery);
@@ -294,8 +308,18 @@ async function startServers(fastApiPort: number, nextjsPort: number) {
     const userConfigPath = getUserConfigPath();
     const disableAuthForElectron = resolveElectronDisableAuth();
     const sofficePath = getSofficePath();
+    const imageMagickRuntime = resolveImageMagickRuntime();
     const exportPackageRoot = path.join(baseDir, "resources", "export");
     const exportConverterPath = resolveExportConverterPath(baseDir);
+    if (imageMagickRuntime) {
+      safeLog("[Presenton] ImageMagick runtime resolved:", {
+        source: imageMagickRuntime.source,
+        binaryPath: imageMagickRuntime.binaryPath,
+        homeDir: imageMagickRuntime.homeDir,
+      });
+    } else {
+      safeWarn("[Presenton] ImageMagick runtime was not found; LiteParse image conversion will fail until it is bundled or installed.");
+    }
     const fastApi = await startFastApiServer(
       fastapiDir,
       fastApiPort,
@@ -353,8 +377,9 @@ async function startServers(fastApiPort: number, nextjsPort: number) {
         // Python invoke the exact binary path instead of relying on PATH.
         ...(sofficePath && {
           SOFFICE_PATH: sofficePath,
+          PRESENTON_OFFICE_RENDERER: "libreoffice",
         }),
-        IMAGEMAGICK_BINARY: getImageMagickBinaryPath(),
+        ...buildImageMagickEnv(imageMagickRuntime),
         LITEPARSE_RUNNER_PATH: getLiteParseRunnerPath(),
         // Use Electron's embedded runtime for LiteParse so parsing does not
         // depend on a system-wide Node installation.
@@ -420,7 +445,6 @@ async function forceQuitApp(exitCode = 0) {
   stopUpdateChecker();
   try {
     await stopActiveExportProcesses();
-    await stopActiveSetupInstallProcesses();
     await stopActiveLibreOfficeInstallProcesses();
     await stopServers();
   } finally {
@@ -430,6 +454,10 @@ async function forceQuitApp(exitCode = 0) {
 
 if (gotSingleInstanceLock) {
 app.whenReady().then(async () => {
+  const disableAuthForElectron = resolveElectronDisableAuth();
+  process.env.DISABLE_AUTH = disableAuthForElectron;
+  process.env.ELECTRON_DISABLE_AUTH = disableAuthForElectron;
+
   // Ensure all required directories exist before starting
   ensureDirectoriesExist();
 
@@ -439,11 +467,10 @@ app.whenReady().then(async () => {
   );
   updateSentryRuntimeContext(chromiumCacheRecovery);
 
-  // Register install handlers early so the unified setup window can use them
+  // Register LibreOffice handlers for Template Studio's on-demand installer.
   setupLibreOfficeInstallHandlers();
-  setupSetupInstallHandlers();
 
-  // Create main window before setup so that when user skips, the main window stays open
+  // Create main window and show the launch page while local servers boot.
   createWindow();
   const initialWindow = getLiveMainWindow();
   if (initialWindow && !initialWindow.webContents.isDestroyed()) {
@@ -456,47 +483,10 @@ app.whenReady().then(async () => {
       });
   }
 
-  // Single installer: checks LibreOffice, ImageMagick, and export Chromium; if any are
-  // missing, shows one window that installs them one after another.
-  const setupCompleted = await checkDependenciesBeforeWindow();
-  if (!setupCompleted) {
-    // Block app usage when required setup is not completed.
-    getLiveMainWindow()?.destroy();
-    app.quit();
-    return;
-  }
-
-  // Update startup status after setup (user may have installed one or both)
-  const [loResult, imageMagickOk] = await Promise.all([
-    isLibreOfficeInstalled(),
-    Promise.resolve(isImageMagickInstalled()),
-  ]);
-  startupStatus.libreoffice = loResult.installed ? "installed" : "missing";
-  startupStatus.imagemagick = imageMagickOk ? "installed" : "missing";
-  startupStatus.chromium = isExportChromiumAvailable() ? "installed" : "missing";
-
   // Ensure the launch screen stays visible and focused during the server boot.
   const launchWindow = getLiveMainWindow();
   launchWindow?.show();
   launchWindow?.focus();
-
-  const sendStartupStatus = (name: string, status: string) => {
-    startupStatus[name] = status;
-    const mainWindow = getLiveMainWindow();
-    if (!mainWindow || mainWindow.webContents.isDestroyed()) {
-      return;
-    }
-    mainWindow.webContents.send("startup:status", { name, status });
-  };
-
-  const statusWindow = getLiveMainWindow();
-  if (statusWindow && !statusWindow.webContents.isDestroyed()) {
-    statusWindow.webContents.once("did-finish-load", () => {
-      sendStartupStatus("libreoffice", startupStatus.libreoffice);
-      sendStartupStatus("imagemagick", startupStatus.imagemagick);
-      sendStartupStatus("chromium", startupStatus.chromium);
-    });
-  }
 
   try {
     setUserConfig({
@@ -565,7 +555,10 @@ app.whenReady().then(async () => {
   }
 
   try {
-    await mainWindow.loadURL(`${localhost}:${nextjsPort}`);
+    const appPath = isDisableAuthEnabledValue(process.env.DISABLE_AUTH)
+      ? "/upload"
+      : "";
+    await mainWindow.loadURL(`${localhost}:${nextjsPort}${appPath}`);
   } catch (error) {
     if (mainWindow.isDestroyed()) {
       return;

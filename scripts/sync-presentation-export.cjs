@@ -1,3 +1,17 @@
+/**
+ * Download presenton-export release (Linux x64) into repo-root `presentation-export/`.
+ * Same release host as Electron (`electron/scripts/sync-export-runtime.cjs`); Docker uses this at build time.
+ *
+ * Version resolution (first match):
+ *   1. EXPORT_RUNTIME_VERSION env
+ *   2. package.json → presentationExportVersion
+ *
+ * CLI: --force  re-download even if valid runtime already exists
+ *       --check-only  verify index.cjs + converter exist and exit 0/1
+ *
+ * On every run (including --check-only), index.cjs is overwritten from index.js
+ * so the CommonJS entrypoint never drifts from the bundled ESM build.
+ */
 const fs = require("fs");
 const path = require("path");
 const https = require("https");
